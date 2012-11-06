@@ -42,13 +42,6 @@ static pos positions[16];
 
 #define CURR_OFFSET (positions[level].offset)
 
-/* Data type to hold opcode with optional key name an success status */
-typedef struct {
-    char* key;
-    int type;
-    char success;
-} entry;
-
 /* Hold a stack of errors */
 typedef struct {
     char error[16][1024];
@@ -63,6 +56,13 @@ static errors_t errors;
     errors.level++; \
 }
 
+/* Data type to hold opcode with optional key name an success status */
+typedef struct {
+    char* key;
+    int type;
+    char success;
+} entry;
+
 /* Global vars that are actally used as constants. The following double
  * values are used for double on-disk serialization, and are initialized
  * at runtime to avoid strange compiler optimizations. */
@@ -74,12 +74,14 @@ static char types[256][16];
 /* Prototypes */
 uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
 
+/* Return true if 't' is a valid object type. */
 int checkType(unsigned char t) {
     /* In case a new object type is added, update the following 
      * condition as necessary. */
-    return ((t <= REDIS_HASH_ZIPLIST && t >= REDIS_HASH_ZIPMAP) ||
-        (t <= REDIS_HASH && t >= REDIS_STRING) ||
-        (t <= REDIS_EOF && t >= REDIS_EXPIRETIME_MS));
+    return
+        (t >= REDIS_HASH_ZIPMAP && t <= REDIS_HASH_ZIPLIST) ||
+        t <= REDIS_HASH ||
+        t >= REDIS_EXPIRETIME_MS;
 }
 
 /* when number of bytes to read is negative, do a peek */
@@ -145,10 +147,12 @@ int peekType() {
 }
 
 /* discard time, just consume the bytes */
-int processTime() {
+int processTime(int type) {
     uint32_t offset = CURR_OFFSET;
     unsigned char t[8];
-    if (readBytes(t, 8)) {
+    int timelen = (type == REDIS_EXPIRETIME_MS) ? 8 : 4;
+
+    if (readBytes(t,timelen)) {
         return 1;
     } else {
         SHIFT_ERROR(offset, "Could not read time");
@@ -379,7 +383,7 @@ int keyMatch(entry *e){
     }
     
     return 0;
-};
+}
 
 int loadPair(entry *e) {
     uint32_t offset = CURR_OFFSET;
@@ -389,10 +393,9 @@ int loadPair(entry *e) {
     char *key;
     if (processStringObject(&key)) {
         e->key = key;
-        keyMatch(e);
+        /*keyMatch(e);*/
     } else {
-        SHIFT_ERROR(offset, 
-            "Error reading entry key");
+        SHIFT_ERROR(offset, "Error reading entry key");
         return 0;
     }
 
@@ -402,8 +405,7 @@ int loadPair(entry *e) {
         e->type == REDIS_ZSET ||
         e->type == REDIS_HASH) {
         if ((length = loadLength(NULL)) == REDIS_RDB_LENERR) {
-            SHIFT_ERROR(offset, 
-                "Error reading %s length", types[e->type]);
+            SHIFT_ERROR(offset, "Error reading %s length", types[e->type]);
             return 0;
         }
     }
@@ -500,7 +502,7 @@ entry loadEntry() {
         /* optionally consume expire */
         if (e.type == REDIS_EXPIRETIME || 
             e.type == REDIS_EXPIRETIME_MS) {
-            if (!processTime()) return e;
+            if (!processTime(e.type)) return e;
             if (!loadType(&e)) return e;
         }
 
@@ -587,7 +589,16 @@ void printErrorStack(entry *e) {
 void process() {
     uint64_t num_errors = 0, num_valid_ops = 0, num_valid_bytes = 0;
     entry entry;
-    processHeader();
+    int dump_version = processHeader();
+
+    /* Exclude the final checksum for RDB >= 5. Will be checked at the end. */
+    if (dump_version >= 5) {
+        if (positions[0].size < 8) {
+            printf("RDB version >= 5 but no room for checksum.\n");
+            exit(1);
+        }
+        positions[0].size -= 8;;
+    }
 
     level = 1;
     while(positions[0].offset < positions[0].size) {
@@ -632,11 +643,12 @@ void process() {
             /* advance position */
             positions[0] = positions[1];
         }
+        free(entry.key);
     }
 
     /* because there is another potential error,
      * print how many valid ops we have processed */
-    //printValid(num_valid_ops, num_valid_bytes);
+    /*printValid(num_valid_ops, num_valid_bytes);*/
     db_stats.num_valid_ops = num_valid_ops;
     db_stats.num_valid_bytes = num_valid_bytes;
 
@@ -644,14 +656,33 @@ void process() {
     if (entry.type != REDIS_EOF) {
         /* last byte should be EOF, add error */
         errors.level = 0;
-        SHIFT_ERROR(positions[0].offset, 
-            "Expected EOF, got %s", types[entry.type]);
+        SHIFT_ERROR(positions[0].offset, "Expected EOF, got %s", types[entry.type]);
 
         /* this is an EOF error so reset type */
         entry.type = -1;
         printErrorStack(&entry);
 
         num_errors++;
+    }
+
+    /* Verify checksum */
+    if (dump_version >= 5) {
+        uint64_t crc = crc64(0,positions[0].data,positions[0].size);
+        uint64_t crc2;
+        unsigned char *p = (unsigned char*)positions[0].data+positions[0].size;
+        crc2 = ((uint64_t)p[0] << 0) |
+               ((uint64_t)p[1] << 8) |
+               ((uint64_t)p[2] << 16) |
+               ((uint64_t)p[3] << 24) |
+               ((uint64_t)p[4] << 32) |
+               ((uint64_t)p[5] << 40) |
+               ((uint64_t)p[6] << 48) |
+               ((uint64_t)p[7] << 56);
+        if (crc != crc2) {
+            SHIFT_ERROR(positions[0].offset, "RDB CRC64 does not match.");
+        } else {
+            printf("CRC64 checksum is OK\n");
+        }
     }
 
     /* print summary on errors */
