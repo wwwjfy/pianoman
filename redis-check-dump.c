@@ -393,7 +393,7 @@ int loadPair(entry *e) {
     char *key;
     if (processStringObject(&key)) {
         e->key = key;
-        /*keyMatch(e);*/
+        keyMatch(e);
     } else {
         SHIFT_ERROR(offset, "Error reading entry key");
         return 0;
