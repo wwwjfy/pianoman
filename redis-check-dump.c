@@ -30,11 +30,17 @@
 
 db_stat db_stats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
+/* data type to hold offset in file and size */
 typedef struct {
     void *data;
     size_t size;
     size_t offset;
 } pos;
+
+static unsigned char level = 0;
+static pos positions[16];
+
+#define CURR_OFFSET (positions[level].offset)
 
 /* Data type to hold opcode with optional key name an success status */
 typedef struct {
@@ -49,13 +55,6 @@ typedef struct {
     size_t offset[16];
     size_t level;
 } errors_t;
-
-static pos positions[16];
-
-static unsigned char level = 0;
-
-#define CURR_OFFSET (positions[level].offset)
-
 static errors_t errors;
 
 #define SHIFT_ERROR(provided_offset, ...) { \
@@ -71,6 +70,17 @@ static double R_Zero, R_PosInf, R_NegInf, R_Nan;
 
 /* store string types for output */
 static char types[256][16];
+
+/* Prototypes */
+uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
+
+int checkType(unsigned char t) {
+    /* In case a new object type is added, update the following 
+     * condition as necessary. */
+    return ((t <= REDIS_HASH_ZIPLIST && t >= REDIS_HASH_ZIPMAP) ||
+        (t <= REDIS_HASH && t >= REDIS_STRING) ||
+        (t <= REDIS_EOF && t >= REDIS_EXPIRETIME_MS));
+}
 
 /* when number of bytes to read is negative, do a peek */
 int readBytes(void *target, long num) {
@@ -101,10 +111,10 @@ int processHeader() {
     }
 
     dump_version = (int)strtol(buf + 5, NULL, 10);
-    if (dump_version < 1 || dump_version > 2) {
+    if (dump_version < 1 || dump_version > 6) {
         ERROR("Unknown RDB format version: %d\n", dump_version);
     }
-    return 1;
+    return dump_version;
 }
 
 int loadType(entry *e) {
@@ -113,7 +123,7 @@ int loadType(entry *e) {
     /* this byte needs to qualify as type */
     unsigned char t;
     if (readBytes(&t, 1)) {
-        if (t <= 4 || (t >=9 && t <= 12) || t >= 253) {
+        if (checkType(t)) {
             e->type = t;
             return 1;
         } else {
@@ -129,7 +139,7 @@ int loadType(entry *e) {
 
 int peekType() {
     unsigned char t;
-    if (readBytes(&t, -1) && (t <= 4 || (t >=9 && t <= 12) || t >= 253))
+    if (readBytes(&t, -1) && (checkType(t)))
         return t;
     return -1;
 }
@@ -137,8 +147,8 @@ int peekType() {
 /* discard time, just consume the bytes */
 int processTime() {
     uint32_t offset = CURR_OFFSET;
-    unsigned char t[4];
-    if (readBytes(t, 4)) {
+    unsigned char t[8];
+    if (readBytes(t, 8)) {
         return 1;
     } else {
         SHIFT_ERROR(offset, "Could not read time");
@@ -195,8 +205,7 @@ char *loadIntegerObject(int enctype) {
         v = enc[0]|(enc[1]<<8)|(enc[2]<<16)|(enc[3]<<24);
         val = (int32_t)v;
     } else {
-        SHIFT_ERROR(offset, 
-            "Unknown integer encoding (0x%02x)", enctype);
+        SHIFT_ERROR(offset, "Unknown integer encoding (0x%02x)", enctype);
         return NULL;
     }
 
@@ -247,8 +256,7 @@ char* loadStringObject() {
             return loadLzfStringObject();
         default:
             /* unknown encoding */
-            SHIFT_ERROR(offset, 
-                "Unknown string encoding (0x%02x)", len);
+            SHIFT_ERROR(offset, "Unknown string encoding (0x%02x)", len);
             return NULL;
         }
     }
@@ -268,8 +276,7 @@ int processStringObject(char** store) {
     unsigned long offset = CURR_OFFSET;
     char *key = loadStringObject();
     if (key == NULL) {
-        SHIFT_ERROR(offset, 
-            "Error reading string object");
+        SHIFT_ERROR(offset, "Error reading string object");
         free(key);
         return 0;
     }
@@ -309,8 +316,7 @@ int processDoubleValue(double** store) {
     unsigned long offset = CURR_OFFSET;
     double *val = loadDoubleValue();
     if (val == NULL) {
-        SHIFT_ERROR(offset,
-            "Error reading double value");
+        SHIFT_ERROR(offset, "Error reading double value");
         free(val);
         return 0;
     }
@@ -323,8 +329,11 @@ int processDoubleValue(double** store) {
     return 1;
 }
 
-int keyMatch(char *key){
+int keyMatch(entry *e){
+	char *key = e->key;
+	unsigned int type = e->type;
     int i;
+    
     db_stats.total_keys++;
 
     for(i = 0; i < db_stats.match_count; i++){
@@ -345,6 +354,30 @@ int keyMatch(char *key){
             };
         }
     };
+    
+    switch(e->type) {
+    case REDIS_STRING:
+		db_stats.strings++;
+		break;
+    case REDIS_HASH:
+    case REDIS_HASH_ZIPMAP:
+    case REDIS_HASH_ZIPLIST:
+		db_stats.hashes++;
+		break;
+    case REDIS_LIST:
+    case REDIS_LIST_ZIPLIST:
+		db_stats.lists++;
+		break;
+    case REDIS_SET:
+    case REDIS_SET_INTSET:
+		db_stats.sets++;
+		break;
+    case REDIS_ZSET:
+    case REDIS_ZSET_ZIPLIST:
+		db_stats.zsets++;
+		break;
+    }
+    
     return 0;
 };
 
@@ -356,7 +389,7 @@ int loadPair(entry *e) {
     char *key;
     if (processStringObject(&key)) {
         e->key = key;
-        keyMatch(key);
+        keyMatch(e);
     } else {
         SHIFT_ERROR(offset, 
             "Error reading entry key");
@@ -376,79 +409,60 @@ int loadPair(entry *e) {
     }
 
     switch(e->type) {
+    case REDIS_STRING:
     case REDIS_HASH_ZIPMAP:
     case REDIS_LIST_ZIPLIST:
     case REDIS_SET_INTSET:
     case REDIS_ZSET_ZIPLIST:
-    case REDIS_STRING:
+    case REDIS_HASH_ZIPLIST:
         if (!processStringObject(NULL)) {
             SHIFT_ERROR(offset, "Error reading entry value");
             return 0;
         }
-        db_stats.strings += 1;
     break;
     case REDIS_LIST:
-        for (i = 0; i < length; i++) {
-            offset = CURR_OFFSET;
-            if (!processStringObject(NULL)) {
-                SHIFT_ERROR(offset, 
-                    "Error reading element at index %d (length: %d)", i, length);
-                return 0;
-            }
-        }
-        db_stats.lists += 1;
-    break;
     case REDIS_SET:
         for (i = 0; i < length; i++) {
             offset = CURR_OFFSET;
             if (!processStringObject(NULL)) {
-                SHIFT_ERROR(offset, 
-                    "Error reading element at index %d (length: %d)", i, length);
+                SHIFT_ERROR(offset, "Error reading element at index %d (length: %d)", i, length);
                 return 0;
             }
         }
-        db_stats.sets+= 1;
     break;
     case REDIS_ZSET:
         for (i = 0; i < length; i++) {
             offset = CURR_OFFSET;
             if (!processStringObject(NULL)) {
-                SHIFT_ERROR(offset, 
-                    "Error reading element key at index %d (length: %d)", i, length);
+                SHIFT_ERROR(offset, "Error reading element key at index %d (length: %d)", i, length);
                 return 0;
             }
             offset = CURR_OFFSET;
             if (!processDoubleValue(NULL)) {
-                SHIFT_ERROR(offset, 
-                    "Error reading element value at index %d (length: %d)", i, length);
+                SHIFT_ERROR(offset, "Error reading element value at index %d (length: %d)", i, length);
                 return 0;
             }
         }
-        db_stats.zsets += 1;
     break;
     case REDIS_HASH:
         for (i = 0; i < length; i++) {
             offset = CURR_OFFSET;
             if (!processStringObject(NULL)) {
-                SHIFT_ERROR(offset, 
-                    "Error reading element key at index %d (length: %d)", i, length);
+                SHIFT_ERROR(offset, "Error reading element key at index %d (length: %d)", i, length);
                 return 0;
             }
             offset = CURR_OFFSET;
             if (!processStringObject(NULL)) {
-                SHIFT_ERROR(offset, 
-                    "Error reading element value at index %d (length: %d)", i, length);
+                SHIFT_ERROR(offset, "Error reading element value at index %d (length: %d)", i, length);
                 return 0;
             }
         }
-        db_stats.hashes += 1;
     break;
     default:
         SHIFT_ERROR(offset, "Type not implemented");
         return 0;
     }
     /* because we're done, we assume success */
-    free(key);
     e->success = 1;
     return 1;
 }
@@ -468,29 +482,26 @@ entry loadEntry() {
     offset[1] = CURR_OFFSET;
     if (e.type == REDIS_SELECTDB) {
         if ((length = loadLength(NULL)) == REDIS_RDB_LENERR) {
-            SHIFT_ERROR(offset[1], 
-                "Error reading database number");
+            SHIFT_ERROR(offset[1], "Error reading database number");
             return e;
         }
         if (length > 63) {
-            SHIFT_ERROR(offset[1], 
-                "Database number out of range (%d)", length);
+            SHIFT_ERROR(offset[1], "Database number out of range (%d)", length);
             return e;
         }
     } else if (e.type == REDIS_EOF) {
         if (positions[level].offset < positions[level].size) {
-            SHIFT_ERROR(offset[0], 
-                "Unexpected EOF");
+            SHIFT_ERROR(offset[0], "Unexpected EOF");
         } else {
             e.success = 1;
         }
         return e;
     } else {
         /* optionally consume expire */
-        if (e.type == REDIS_EXPIRETIME) {
+        if (e.type == REDIS_EXPIRETIME || 
+            e.type == REDIS_EXPIRETIME_MS) {
             if (!processTime()) return e;
             if (!loadType(&e)) return e;
-            db_stats.total_expires++;
         }
 
         offset[1] = CURR_OFFSET;
