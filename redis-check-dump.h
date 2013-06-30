@@ -75,10 +75,15 @@
 
 typedef struct {
     int strings;
+    uint64_t strings_size;
     int lists;
+    uint64_t lists_size;
     int sets;
+    uint64_t sets_size;
     int zsets;
+    uint64_t zsets_size;
     int hashes;
+    uint64_t hashes_size;
     int total_keys;
     int total_expires;
     size_t match_count;
@@ -87,6 +92,7 @@ typedef struct {
     uint64_t num_valid_bytes;
     char *matches[MAX_MATCH_KEYS];
     int match_counts[MAX_MATCH_KEYS];
+    uint64_t match_size[MAX_MATCH_KEYS];
 } db_stat;
 
 void processDumpFile(int argc, char **argv);

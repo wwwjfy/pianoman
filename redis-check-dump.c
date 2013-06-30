@@ -28,7 +28,7 @@
 
 #include "redis-check-dump.h"
 
-db_stat db_stats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+db_stat db_stats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 /* data type to hold offset in file and size */
 typedef struct {
@@ -333,7 +333,7 @@ int processDoubleValue(double** store) {
     return 1;
 }
 
-int keyMatch(entry *e){
+int keyMatch(entry *e, uint32_t size){
 	char *key = e->key;
 	unsigned int type = e->type;
     int i;
@@ -355,6 +355,7 @@ int keyMatch(entry *e){
 
             if(strcmp(match, comp)==0){
                 db_stats.match_counts[i] += 1;
+                db_stats.match_size[i] += size;
             };
         }
     };
@@ -362,23 +363,28 @@ int keyMatch(entry *e){
     switch(e->type) {
     case REDIS_STRING:
 		db_stats.strings++;
+        db_stats.strings_size += size;
 		break;
     case REDIS_HASH:
     case REDIS_HASH_ZIPMAP:
     case REDIS_HASH_ZIPLIST:
 		db_stats.hashes++;
+        db_stats.hashes_size += size;
 		break;
     case REDIS_LIST:
     case REDIS_LIST_ZIPLIST:
 		db_stats.lists++;
+        db_stats.lists_size += size;
 		break;
     case REDIS_SET:
     case REDIS_SET_INTSET:
 		db_stats.sets++;
+        db_stats.sets_size += size;
 		break;
     case REDIS_ZSET:
     case REDIS_ZSET_ZIPLIST:
 		db_stats.zsets++;
+        db_stats.zsets_size += size;
 		break;
     }
     
@@ -387,13 +393,13 @@ int keyMatch(entry *e){
 
 int loadPair(entry *e) {
     uint32_t offset = CURR_OFFSET;
+    uint32_t start = CURR_OFFSET;
     uint32_t i;
 
     /* read key first */
     char *key;
     if (processStringObject(&key)) {
         e->key = key;
-        keyMatch(e);
     } else {
         SHIFT_ERROR(offset, "Error reading entry key");
         return 0;
@@ -464,6 +470,7 @@ int loadPair(entry *e) {
         SHIFT_ERROR(offset, "Type not implemented");
         return 0;
     }
+    keyMatch(e, CURR_OFFSET - start);
     /* because we're done, we assume success */
     e->success = 1;
     return 1;
@@ -749,6 +756,7 @@ void processDumpFile(int argc, char **argv){
         while ((argv[i]) && (i < MAX_MATCH_KEYS + 2)){
             db_stats.matches[matchc] = argv[i];
             db_stats.match_counts[matchc] = 0;
+            db_stats.match_size[matchc] = 0;
             matchc++;
             i++;
         }
@@ -777,16 +785,21 @@ void printDbStats(){
         (unsigned long long)db_stats.num_valid_bytes);
 
     printf("\nKey Space:\n\n");
-    printf("Strings: %i (%.2f%%)\n", db_stats.strings,
-        ((float)db_stats.strings/ftotal*100.00));
-    printf("Lists: %i (%.2f%%)\n", db_stats.lists,
-        ((float)db_stats.lists/ftotal*100.00));
-    printf("Sets: %i (%.2f%%)\n", db_stats.sets,
-        ((float)db_stats.sets/ftotal*100.00));
-    printf("Zsets: %i (%.2f%%)\n", db_stats.zsets,
-        ((float)db_stats.zsets/ftotal*100.00));
-    printf("Hashes: %i (%.2f%%)\n", db_stats.hashes,
-        ((float)db_stats.hashes/ftotal*100.00));
+    printf("Strings: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.strings,
+        ((float)db_stats.strings/ftotal*100.00), db_stats.strings_size,
+        ((float)db_stats.strings_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
+    printf("Lists: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.lists,
+        ((float)db_stats.lists/ftotal*100.00), db_stats.lists_size,
+        ((float)db_stats.lists_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
+    printf("Sets: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.sets,
+        ((float)db_stats.sets/ftotal*100.00), db_stats.sets_size,
+        ((float)db_stats.sets_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
+    printf("Zsets: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.zsets,
+        ((float)db_stats.zsets/ftotal*100.00), db_stats.zsets_size,
+        ((float)db_stats.zsets_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
+    printf("Hashes: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.hashes,
+        ((float)db_stats.hashes/ftotal*100.00), db_stats.hashes_size,
+        ((float)db_stats.hashes_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
     printf("Total Keys: %i\n", db_stats.total_keys);
     printf("Total Expires: %i (%.2f%%)\n", db_stats.total_expires,
         ((float)db_stats.total_expires/ftotal*100.00));
@@ -795,7 +808,9 @@ void printDbStats(){
     int i;
     for(i = 0; i < db_stats.match_count; i++){
         float fmc = (float)db_stats.match_counts[i];
-        printf("%i) %s %i (%.2f%%)\n", i, db_stats.matches[i],
-            (int)fmc, ((fmc/ftotal)*100.00));
+        float fms = (float)db_stats.match_size[i];
+        printf("%i) %s %i (%.2f%%) size: %i (%.2f%%)\n", i, db_stats.matches[i],
+            (int)fmc, ((fmc/ftotal)*100.00),
+            (int)fms, ((fms/(db_stats.num_valid_bytes-db_stats.num_valid_ops))*100.00));
     }
 }
