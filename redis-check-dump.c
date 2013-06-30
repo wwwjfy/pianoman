@@ -26,6 +26,7 @@
 
 ---------------------------------------------------------------------------*/
 
+#include <inttypes.h>
 #include "redis-check-dump.h"
 
 db_stat db_stats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -785,19 +786,19 @@ void printDbStats(){
         (unsigned long long)db_stats.num_valid_bytes);
 
     printf("\nKey Space:\n\n");
-    printf("Strings: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.strings,
+    printf("Strings: %i (%.2f%%) size: %"PRIu64" (%.2f%%)\n", db_stats.strings,
         ((float)db_stats.strings/ftotal*100.00), db_stats.strings_size,
         ((float)db_stats.strings_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
-    printf("Lists: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.lists,
+    printf("Lists: %i (%.2f%%) size: %"PRIu64" (%.2f%%)\n", db_stats.lists,
         ((float)db_stats.lists/ftotal*100.00), db_stats.lists_size,
         ((float)db_stats.lists_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
-    printf("Sets: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.sets,
+    printf("Sets: %i (%.2f%%) size: %"PRIu64" (%.2f%%)\n", db_stats.sets,
         ((float)db_stats.sets/ftotal*100.00), db_stats.sets_size,
         ((float)db_stats.sets_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
-    printf("Zsets: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.zsets,
+    printf("Zsets: %i (%.2f%%) size: %"PRIu64" (%.2f%%)\n", db_stats.zsets,
         ((float)db_stats.zsets/ftotal*100.00), db_stats.zsets_size,
         ((float)db_stats.zsets_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
-    printf("Hashes: %i (%.2f%%) size: %llu (%.2f%%)\n", db_stats.hashes,
+    printf("Hashes: %i (%.2f%%) size: %"PRIu64" (%.2f%%)\n", db_stats.hashes,
         ((float)db_stats.hashes/ftotal*100.00), db_stats.hashes_size,
         ((float)db_stats.hashes_size/(db_stats.num_valid_bytes-db_stats.num_valid_ops)*100.00));
     printf("Total Keys: %i\n", db_stats.total_keys);
